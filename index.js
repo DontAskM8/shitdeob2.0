@@ -3,105 +3,113 @@ const beautify = require("js-beautify")
 const parser = require("@babel/parser")
 const traverse = require("@babel/traverse").default
 const generator = require("@babel/generator").default
-const types = require("@babel/types")
+const t = require("@babel/types")
 
 var original = fs.readFileSync("./raw.js", "utf8")
 
-var undefinedShit = /''\+.*?(?=\))/g
-for(let i of original.match(undefinedShit)){
-	original = original.replace(i, "undefined")
-}
-
-
-// var evaluableMatches = original.match(/[A-z]+=.*?(,|;)/g)
-var evaluableMatches = /(([A-z]|[0-9])+)=(((((\[|\]|\+|!|-| )+)(?=(,|;))))|(((([A-z]|[0-9])+(\*|\+|-|\/)+)+([A-z]|[0-9])+)(?=(,|;))))/g
-
-function blEval(x) {
-	var arr = ["{}", "[]", "this", "global"]
-	for(let i of arr){
-		if((x == i) || (x == (i + ",")) || (x == (i + ";"))){
-			return true
-		}
-	}
-	return false
-}
-
-
-// Until line 65 shall be updated to babel but im lazy
-var functionsToExecute = /(?<!\w)([A-z]|[0-9])+\(\)/g
-
-for(let k of original.match(functionsToExecute)){
-	var contentOfFunction = new RegExp(`(?<=function ${k}\\(\\){).*?(?=})`, "g")
-	for(let j of original?.match(contentOfFunction) ?? ""){
-		for(let i of j.match(evaluableMatches) ?? ""){
-			try {
-				var evaled = eval(i)
-				if(!blEval(i) && (evaled.toString() != "[object Object]") && !Array.isArray(evaled)){
-					eval("global." + i)
-					original = original.replace(i, [i.split("=")[0], "=", typeof evaled == "string" ? `'${evaled}'` : evaled].join(""))
-				}
-			}catch(e){
-			}
-		}
-		
-	}
-}
-
-
-for(let i of original.match(evaluableMatches) ?? ""){
-	try {
-		var evaled = eval(i)
-		if(!blEval(i) && (evaled.toString() != "[object Object]") && !Array.isArray(evaled)){
-			eval("global." + i)
-			original = original.replace(i, [i.split("=")[0], "=", typeof evaled == "string" ? `'${evaled}'` : evaled].join(""))
-		}
-	}catch(e){
-	}
-}
-
-var globalVars = Object.keys(global).filter(x => !['global', 'clearInterval', 'clearTimeout', 'setInterval', 'setTimeout', 'queueMicrotask', 'performance', 'clearImmediate', 'setImmediate'].includes(x))
+var globalVars = () => Object.keys(global).filter(x => !['global', 'clearInterval', 'clearTimeout', 'setInterval', 'setTimeout', 'queueMicrotask', 'performance', 'clearImmediate', 'setImmediate'].includes(x))
 function isGlobalVars(va){
-	return globalVars.includes(va) && typeof global[va] != "function"
+	return globalVars().includes(va) && typeof global[va] != "function"
 }
 
 //Main function that triggers the entire universe
 var executingFunction = /(?<=(return ))([A-z]|[0-9])+\.call\(this,([A-z]|[0-9])+\)/g
 var [callingFunc, callingVal] = original.match(executingFunction)[0].replace(/call\(this,|\)/g, "").split(".")
 
-console.log(callingFunc, callingVal)
 
+console.log(callingFunc, callingVal)
 
 var _testCode = parser.parse(original)
 traverse(_testCode, {
-	// Replace switch cases var to value
-	SwitchStatement: function(path){
+	//Eval all functions make it global
+	"FunctionDeclaration": function(path){
+		try {
+			if(t.isFunctionDeclaration(path)) eval(`global["${path.node.id.name}"] = ${original.slice(path.node.start, path.node.end)}`)
+			else{
+			}
+		}catch(e){
+		}
+	}
+})
+traverse(_testCode, {
+	"VariableDeclaration": function(path){
+		for(let declaration of path.node.declarations){
+			if(!t.isFunctionExpression(declaration.init)) continue;
+			if(declaration.id.name == callingFunc) continue;
+			try {
+				eval(`global.${declaration.id.name} = ${original.slice(declaration.init.start, declaration.init.end)}`)
+			}
+			catch(e){
+				// console.log(e)
+			}
+		}
+	}
+})
+
+//Eval functions in order to get var values
+traverse(_testCode, {
+	"CallExpression": function(path){
+		if(!t.isIdentifier(path.node.callee) && !global[path.node.callee.name] || !global[path.node.callee.name]?.toString()) return;
+		let tempCode = global[path.node.callee.name].toString()
+		try {
+			let ast2 = parser.parse(tempCode)
+			traverse(ast2, {
+				AssignmentExpression: function(path){
+					var { left, right } = path.node
+					try {
+						eval("global." + tempCode.slice(path.node.start, path.node.end))
+					}catch(e){
+					}
+				}
+			})
+		}catch(e){}
+		
+	}
+})
+
+traverse(_testCode, {
+	//Change var xxx; -> var xxx = value;
+	"VariableDeclarator": function(path){
+		if(typeof global[path.node.id.name] == "number"){
+			path.node.init = t.NumericLiteral(global[path.node.id.name])
+		}
+	},
+	//Change xxx = a + b + c; -> xxx = value
+	"AssignmentExpression": function(path){
+		var { left, right } = path.node
+		
+		//Remove useless xxx = a + b + c
+		if(typeof global[left.name] == "number"){
+			path.remove()
+			return;
+		}
+		
+		if(left.type != "Identifier" || right.type != "Identifier") return;
+		if(!globalVars().includes(right.name)) return;
+		try {
+			// xxx -+= AC -> xxx -+= val
+			Object.assign(right, t.numericLiteral(global[right.name]))
+		}
+		catch{}
+	},
+	//Change case xxx: -> case 69420:
+	"SwitchStatement": function(path){
 		var { node } = path
 		node.cases = node.cases.map(x => {
 			if(!isGlobalVars(x.test?.name)) return x;
 			else {
-				x.test = types.numericLiteral(global[x.test.name])
+				x.test = t.numericLiteral(global[x.test.name])
 				return x
 			}
 		})
 	},
-	//Replace var refer var to value
-	AssignmentExpression: function(path){
-		var { left, right } = path.node
-		if(left.type != "Identifier" || right.type != "Identifier" ) return;
-		if(!globalVars.includes(right.name)) return;
-		try {
-			Object.assign(right, types.numericLiteral(global[right.name]))
-		}
-		catch{}
-	},
-	//Eval all functions make it global
-	"FunctionDeclaration|VariableDeclaration": function(path){
+	"VariableDeclaration": function(path){
 		try {
 			global[path.node.id.name] = eval(original.slice(path.node.start, path.node.end))
 		}catch{
 		}
 		
-		if(types.isVariableDeclaration(path.node) && path.node.declarations.length == 1){
+		if(t.isVariableDeclaration(path.node) && path.node.declarations.length == 1){
 			let { id, init } = path.node.declarations[0]
 			if(id?.name != callingFunc) return;
 			
@@ -116,31 +124,28 @@ traverse(_testCode, {
 			function loopFunction(startVal){
 				eval(`var ${callingParams[0]} = ${startVal}`)
 				while(eval(whileCond)){
-					// console.log(whileLoopInMain.body.body[0])
 					let cases = whileLoopInMain.body.body[0].cases
-					// console.log(cases[0])
 					cases = cases.find(x => {
-						if(types.isIdentifier(x.test)){
+						if(t.isIdentifier(x.test)){
 							return eval(x.test?.name) == eval(callingParams[0])
 						}else{
-							console.log(x.test)
 							return x.test?.value == eval(callingParams[0])
 						}
 					})
 					
 					let { consequent } = cases
-					consequent = consequent.find(x => types.isBlockStatement(x))
+					consequent = consequent.find(x => t.isBlockStatement(x))
 					
 					let { body } = consequent
-					body = body.filter(x => types.isExpressionStatement(x))
+					body = body.filter(x => t.isExpressionStatement(x))
 					for(let content of body){
 						let { expression } = content	
 						//Execute the same loop
-						if(types.isCallExpression(expression) && expression.callee.name == callingParamFunc){
-							loopFunction(eval(expression.arguments.find(x => types.isIdentifier(x)).name))
+						if(t.isCallExpression(expression) && expression.callee.name == callingParamFunc){
+							loopFunction(eval(expression.arguments.find(x => t.isIdentifier(x)).name))
 							
 						}
-						else if(types.isAssignmentExpression(expression)){
+						else if(t.isAssignmentExpression(expression)){
 							if(expression.left.name == callingParams[0]){
 								eval(original.slice(expression.start, expression.end))
 								console.log(`Loop ${eval(startVal)}: ${eval(callingParams[0])}`)
@@ -148,7 +153,7 @@ traverse(_testCode, {
 								try {
 									eval("global." + original.slice(expression.start, expression.end))
 									if(typeof global[expression.left.name] == "number"){
-										expression.right = types.NumericLiteral(global[expression.left.name])
+										expression.right = t.NumericLiteral(global[expression.left.name])
 									}
 								}
 								catch(e){
@@ -169,19 +174,10 @@ traverse(_testCode, {
 			}
 			loopFunction(callingVal)
 		}
-	},
-	SwitchCase: function(path){
-		var { container, parent } = path
-		var subject = parent.discriminant.name
-		for(let cases of container){
-			var testVal = cases.test?.value
-			// console.log(testVal ?? original.slice(cases.loc.start.index, cases.loc.end.index))
-			let block = cases.consequent.find(x => x.type == "BlockStatement")
-			
-		}
-	},
+	}
 })
 
+// console.log(global)
 original = generator(_testCode, {
 	minified: true
 }, original).code
