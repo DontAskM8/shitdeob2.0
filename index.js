@@ -66,6 +66,10 @@ function isGlobalVars(va){
 
 //Main function that triggers the entire universe
 var executingFunction = /(?<=(return ))([A-z]|[0-9])+\.call\(this,([A-z]|[0-9])+\)/g
+var [callingFunc, callingVal] = original.match(executingFunction)[0].replace(/call\(this,|\)/g, "").split(".")
+
+console.log(callingFunc, callingVal)
+
 
 var _testCode = parser.parse(original)
 traverse(_testCode, {
@@ -73,7 +77,7 @@ traverse(_testCode, {
 	SwitchStatement: function(path){
 		var { node } = path
 		node.cases = node.cases.map(x => {
-			if(!isGlobalVars(x.test.name)) return x;
+			if(!isGlobalVars(x.test?.name)) return x;
 			else {
 				x.test = types.numericLiteral(global[x.test.name])
 				return x
@@ -91,12 +95,91 @@ traverse(_testCode, {
 		catch{}
 	},
 	//Eval all functions make it global
-	FunctionDeclaration: function(path){
+	"FunctionDeclaration|VariableDeclaration": function(path){
 		try {
 			global[path.node.id.name] = eval(original.slice(path.node.start, path.node.end))
 		}catch{
 		}
-	}
+		
+		if(types.isVariableDeclaration(path.node) && path.node.declarations.length == 1){
+			let { id, init } = path.node.declarations[0]
+			if(id?.name != callingFunc) return;
+			
+			let callingParamFunc = init.id.name
+			let callingParams = init.params.map(x => x.name)
+			
+			let whileLoopInMain = init.body.body.find(x => x.type == "WhileStatement")
+			let whileCond = original.slice(whileLoopInMain.test.loc.start.index, whileLoopInMain.test.loc.end.index)
+			
+			
+			
+			function loopFunction(startVal){
+				eval(`var ${callingParams[0]} = ${startVal}`)
+				while(eval(whileCond)){
+					// console.log(whileLoopInMain.body.body[0])
+					let cases = whileLoopInMain.body.body[0].cases
+					// console.log(cases[0])
+					cases = cases.find(x => {
+						if(types.isIdentifier(x.test)){
+							return eval(x.test?.name) == eval(callingParams[0])
+						}else{
+							console.log(x.test)
+							return x.test?.value == eval(callingParams[0])
+						}
+					})
+					
+					let { consequent } = cases
+					consequent = consequent.find(x => types.isBlockStatement(x))
+					
+					let { body } = consequent
+					body = body.filter(x => types.isExpressionStatement(x))
+					for(let content of body){
+						let { expression } = content	
+						//Execute the same loop
+						if(types.isCallExpression(expression) && expression.callee.name == callingParamFunc){
+							loopFunction(eval(expression.arguments.find(x => types.isIdentifier(x)).name))
+							
+						}
+						else if(types.isAssignmentExpression(expression)){
+							if(expression.left.name == callingParams[0]){
+								eval(original.slice(expression.start, expression.end))
+								console.log(`Loop ${eval(startVal)}: ${eval(callingParams[0])}`)
+							}else if(expression.operator == "="){
+								try {
+									eval("global." + original.slice(expression.start, expression.end))
+									if(typeof global[expression.left.name] == "number"){
+										expression.right = types.NumericLiteral(global[expression.left.name])
+									}
+								}
+								catch(e){
+								}
+							}else{
+								try {
+									eval(original.slice(expression.start, expression.end))
+								}
+								catch{}
+							}
+							
+						}
+					}
+					if(!eval(whileCond)){
+						console.log("Exiting loop", eval(startVal))
+					}
+				}
+			}
+			loopFunction(callingVal)
+		}
+	},
+	SwitchCase: function(path){
+		var { container, parent } = path
+		var subject = parent.discriminant.name
+		for(let cases of container){
+			var testVal = cases.test?.value
+			// console.log(testVal ?? original.slice(cases.loc.start.index, cases.loc.end.index))
+			let block = cases.consequent.find(x => x.type == "BlockStatement")
+			
+		}
+	},
 })
 
 original = generator(_testCode, {
