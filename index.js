@@ -24,7 +24,15 @@ traverse(_testCode, {
 	//Eval all functions make it global
 	"FunctionDeclaration": function(path){
 		try {
-			if(t.isFunctionDeclaration(path)) eval(`global["${path.node.id.name}"] = ${original.slice(path.node.start, path.node.end)}`)
+			if(t.isFunctionDeclaration(path)) {
+				eval(`global["${path.node.id.name}"] = ${original.slice(path.node.start, path.node.end)}`)
+				if(path.node.body.body.length == 1){
+					if(path.node.body.body[0].expression.type == "AssignmentExpression"){
+						// console.log(path.node.body.body[0].expression)
+						eval("global." + original.slice(path.node.body.body[0].expression.start, path.node.body.body[0].expression.end))
+					}
+				}
+			}
 			else{
 			}
 		}catch(e){
@@ -35,9 +43,23 @@ traverse(_testCode, {
 	"VariableDeclaration": function(path){
 		for(let declaration of path.node.declarations){
 			if(!t.isFunctionExpression(declaration.init)) continue;
-			if(declaration.id.name == callingFunc) continue;
 			try {
+				// seems some function cannot be executed ? so we skip those large ass functions ?
+				if((declaration.init.end - declaration.init.start) >= 5500) {
+					console.log(declaration.id.name, declaration.init.end - declaration.init.start)
+					return;
+				}
 				eval(`global.${declaration.id.name} = ${original.slice(declaration.init.start, declaration.init.end)}`)
+				if(declaration.init.id){
+					// var xx = function yy(){} -> yy = xx
+					global[declaration.init.id.name] = eval(declaration.id.name)
+				}
+				
+				if(declaration.init.body.body.length == 1){
+					if(declaration.init.body.body[0].expression.type == "AssignmentExpression"){
+						eval("global." + original.slice(declaration.init.body.body[0].expression.start, declaration.init.body.body[0].expression.end))
+					}
+				}
 			}
 			catch(e){
 				// console.log(e)
@@ -45,7 +67,6 @@ traverse(_testCode, {
 		}
 	}
 })
-
 //Eval functions in order to get var values
 traverse(_testCode, {
 	"CallExpression": function(path){
@@ -76,12 +97,17 @@ traverse(_testCode, {
 	},
 	//Change xxx = a + b + c; -> xxx = value
 	"AssignmentExpression": function(path){
+		//issue here ?
+		// return;
 		var { left, right } = path.node
 		
-		//Remove useless xxx = a + b + c
+		// Remove useless xxx = a + b + c
 		if(typeof global[left.name] == "number"){
-			path.remove()
-			return;
+			try {
+				path.remove()
+				return;
+			}catch{}
+			
 		}
 		
 		if(left.type != "Identifier" || right.type != "Identifier") return;
@@ -103,6 +129,7 @@ traverse(_testCode, {
 			}
 		})
 	},
+	//Do the main switch loop bullshit idek
 	"VariableDeclaration": function(path){
 		try {
 			global[path.node.id.name] = eval(original.slice(path.node.start, path.node.end))
@@ -119,9 +146,8 @@ traverse(_testCode, {
 			let whileLoopInMain = init.body.body.find(x => x.type == "WhileStatement")
 			let whileCond = original.slice(whileLoopInMain.test.loc.start.index, whileLoopInMain.test.loc.end.index)
 			
-			
-			
 			function loopFunction(startVal){
+				console.log("Starting loop", eval(startVal))
 				eval(`var ${callingParams[0]} = ${startVal}`)
 				while(eval(whileCond)){
 					let cases = whileLoopInMain.body.body[0].cases
@@ -132,7 +158,6 @@ traverse(_testCode, {
 							return x.test?.value == eval(callingParams[0])
 						}
 					})
-					
 					let { consequent } = cases
 					consequent = consequent.find(x => t.isBlockStatement(x))
 					
@@ -164,7 +189,11 @@ traverse(_testCode, {
 								}
 								catch{}
 							}
-							
+						} else if(t.isCallExpression(expression) && expression.callee.object?.name == callingParamFunc){
+							let loopVal = expression.arguments.find(x => t.isIdentifier(x))
+							if(loopVal){
+								loopFunction(eval(expression.arguments.find(x => t.isIdentifier(x)).name))
+							}
 						}
 					}
 					if(!eval(whileCond)){
@@ -174,9 +203,28 @@ traverse(_testCode, {
 			}
 			loopFunction(callingVal)
 		}
+	},
+	// funct(xxxx,xxxx,....); -> funct(val, val, .....);
+	"CallExpression": function(path){
+		for(let arg of path.node.arguments){
+			if(!t.isIdentifier(arg)) continue;
+			if(typeof global[arg.name] != "number") continue;
+			Object.assign(arg, t.NumericLiteral(global[arg.name]))
+		}
+		// console.log(path.node.callee.name)
+	},
+	"ArrayExpression": function(path){
+		for(let elem of path.node.elements){
+			if(!t.isIdentifier(elem)) continue;
+			if(typeof global[elem.name] != "number") continue;
+			Object.assign(elem, t.NumericLiteral(global[elem.name]))
+		}
 	}
 })
 
+// console.log(global.RB(279, 913))
+// console.log(global.RB(84, 309))
+  
 // console.log(global)
 original = generator(_testCode, {
 	minified: true
