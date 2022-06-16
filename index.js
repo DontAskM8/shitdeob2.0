@@ -16,6 +16,8 @@ function isGlobalVars(va){
 var executingFunction = /(?<=(return ))([A-z]|[0-9])+\.call\(this,([A-z]|[0-9])+\)/g
 var [callingFunc, callingVal] = original.match(executingFunction)[0].replace(/call\(this,|\)/g, "").split(".")
 let switchSub = []
+let objName = ""
+let windowName = ""
 
 console.log(callingFunc, callingVal)
 
@@ -42,6 +44,14 @@ traverse(_testCode, {
 traverse(_testCode, {
 	"VariableDeclaration": function(path){
 		for(let declaration of path.node.declarations){
+			if(objName == "" && t.isObjectExpression(declaration.init)){
+				objName = declaration.id.name
+				eval(`${objName} = {}`)
+			}
+			if(windowName == "" && t.isIdentifier(declaration.init) && declaration.init.name == "window"){
+				windowName = declaration.id.name
+				eval(`${windowName} = global`)
+			}
 			if(!t.isFunctionExpression(declaration.init)) continue;
 			try {
 				eval(`global.${declaration.id.name} = ${original.slice(declaration.init.start, declaration.init.end)}`)
@@ -115,6 +125,11 @@ traverse(_testCode, {
 			
 		}
 		
+		// if(global[left.name] && t.isFunctionExpression(right)){
+			// console.log(left.name, global[left.name].toString())
+			// global[left.name] = 
+		// }
+		
 		if(left.type != "Identifier" || right.type != "Identifier") return;
 		if(!globalVars().includes(right.name)) return;
 		try {
@@ -163,9 +178,11 @@ traverse(_testCode, {
 						}
 					})
 					let { consequent } = cases
+					
 					consequent = consequent.find(x => t.isBlockStatement(x))
 					
 					let { body } = consequent
+					
 					body = body.filter(x => t.isExpressionStatement(x))
 					for(let content of body){
 						let { expression } = content	
@@ -193,7 +210,8 @@ traverse(_testCode, {
 								}
 								catch{}
 							}
-						} else if(t.isCallExpression(expression) && expression.callee.object?.name == callingParamFunc){
+						}
+						else if(t.isCallExpression(expression) && expression.callee.object?.name == callingParamFunc){
 							let loopVal = expression.arguments.find(x => t.isIdentifier(x))
 							if(loopVal){
 								loopFunction(eval(expression.arguments.find(x => t.isIdentifier(x)).name))
@@ -229,10 +247,106 @@ traverse(_testCode, {
 	}
 })
 
-// console.log(RB(275, 478))
-console.log(global.RB.toString())
-  
+traverse(_testCode, {
+	"VariableDeclaration": function(path){
+		for(let declaration of path.node.declarations){
+			if(!t.isFunctionExpression(declaration.init)) continue;
+			try {
+				eval(`global.${declaration.id.name} = ${original.slice(declaration.init.start, declaration.init.end)}`)
+				if(declaration.init.id){
+					// var xx = function yy(){} -> yy = xx
+					global[declaration.init.id.name] = eval(declaration.id.name)
+				}
+				
+				if(declaration.init.body.body.length == 1){
+					if(declaration.init.body.body[0].expression.type == "AssignmentExpression"){
+						eval("global." + original.slice(declaration.init.body.body[0].expression.start, declaration.init.body.body[0].expression.end))
+					}
+				}
+			}
+			catch(e){
+				// console.log(e)
+			}
+		}
+	},
+	// Get all the switch subjects so we dont accidentally remove the assignment
+	"SwitchStatement": function(path){
+		var { node } = path
+		switchSub.push(node.discriminant.name)
+	},
+})
+ 
+// var fx = global;
+// console.log(RB(0, 0))
+// console.log(RB(186, 692))
+
 // console.log(global)
+
+var mainFunctions = []
+for(let i in global){
+	if((typeof global[i] == "function") && (global[i].name != "")){
+		if((i != global[i].name)){
+			if(i != callingFunc) mainFunctions.push(i)
+		}
+	}
+}
+
+console.log(mainFunctions)
+
+let stringFunction = ""
+for(let i in global){
+	if((typeof global[i] == "function") && (global[i].name == "")){
+		if(i != global[i].name){
+			for(let j of mainFunctions){
+				if(global[i].toString().includes(j + ".apply")){
+					let funcAssignCount = [...original.matchAll(i + "=")].length
+					if(funcAssignCount != 1) stringFunction = i
+				} 
+			}
+		}
+	}
+}
+
+let funcRegex = new RegExp(`${stringFunction}=function.*?}`, "g")
+let funcTypes = original.match(funcRegex)
+var first = funcTypes.find(x => x.includes(callingFunc))
+var second = funcTypes.find(x => !x.includes(callingFunc))
+
+traverse(_testCode, {
+	CallExpression: function(path){
+		if(!t.isMemberExpression(path.node.callee)) return;
+		var { callee } = path.node
+		if(callee.object.name != objName) return;
+		let argLen = path.node.arguments.length
+		let str = original.slice(path.node.start, path.node.end)
+		try {
+			if(argLen == 4){
+				// eval("xx." + callee.property.name + "=" + stringFunction)
+				// eval("global." + second)
+				// var val = eval(str)
+				// console.log(val)
+				// if(typeof val == "string"){
+					// path.replaceWith(t.StringLiteral(val))
+				// }
+			}
+			else{
+				eval("xx." + callee.property.name + "=" + stringFunction)
+				eval("global." + first)
+				var val = eval(str)
+				console.log(val)
+				if(typeof val == "string"){
+					path.replaceWith(t.StringLiteral(val))
+				}
+			}
+		}catch(e){
+			console.log(e)
+		}
+	},
+	// "MemberExpression": function(path){
+		// if(typeof global[path.node.property.name] == "number") path.node.property = (t.NumericLiteral(global[path.node.property.name]))
+	// }
+})
+
 original = generator(_testCode, {
 	minified: true
 }, original).code
