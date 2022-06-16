@@ -15,7 +15,7 @@ function isGlobalVars(va){
 //Main function that triggers the entire universe
 var executingFunction = /(?<=(return ))([A-z]|[0-9])+\.call\(this,([A-z]|[0-9])+\)/g
 var [callingFunc, callingVal] = original.match(executingFunction)[0].replace(/call\(this,|\)/g, "").split(".")
-
+let switchSub = []
 
 console.log(callingFunc, callingVal)
 
@@ -44,11 +44,6 @@ traverse(_testCode, {
 		for(let declaration of path.node.declarations){
 			if(!t.isFunctionExpression(declaration.init)) continue;
 			try {
-				// seems some function cannot be executed ? so we skip those large ass functions ?
-				if((declaration.init.end - declaration.init.start) >= 5500) {
-					console.log(declaration.id.name, declaration.init.end - declaration.init.start)
-					return;
-				}
 				eval(`global.${declaration.id.name} = ${original.slice(declaration.init.start, declaration.init.end)}`)
 				if(declaration.init.id){
 					// var xx = function yy(){} -> yy = xx
@@ -65,8 +60,14 @@ traverse(_testCode, {
 				// console.log(e)
 			}
 		}
-	}
+	},
+	// Get all the switch subjects so we dont accidentally remove the assignment
+	"SwitchStatement": function(path){
+		var { node } = path
+		switchSub.push(node.discriminant.name)
+	},
 })
+
 //Eval functions in order to get var values
 traverse(_testCode, {
 	"CallExpression": function(path){
@@ -77,7 +78,10 @@ traverse(_testCode, {
 			traverse(ast2, {
 				AssignmentExpression: function(path){
 					var { left, right } = path.node
+					if(switchSub.includes(left.name)) return;
 					try {
+						// +-* something that doesnt exists should be prevented
+						if(["*=", "+=", "-=", "/="].includes(path.node.operator) && typeof global[left.name] == "undefined") return;
 						eval("global." + tempCode.slice(path.node.start, path.node.end))
 					}catch(e){
 					}
@@ -92,6 +96,7 @@ traverse(_testCode, {
 	//Change var xxx; -> var xxx = value;
 	"VariableDeclarator": function(path){
 		if(typeof global[path.node.id.name] == "number"){
+			if(path.node.id.name == "wqx") console.log(global[path.node.id.name])
 			path.node.init = t.NumericLiteral(global[path.node.id.name])
 		}
 	},
@@ -102,7 +107,7 @@ traverse(_testCode, {
 		var { left, right } = path.node
 		
 		// Remove useless xxx = a + b + c
-		if(typeof global[left.name] == "number"){
+		if(typeof global[left.name] == "number" && !switchSub.includes(left.name)){
 			try {
 				path.remove()
 				return;
@@ -135,7 +140,6 @@ traverse(_testCode, {
 			global[path.node.id.name] = eval(original.slice(path.node.start, path.node.end))
 		}catch{
 		}
-		
 		if(t.isVariableDeclaration(path.node) && path.node.declarations.length == 1){
 			let { id, init } = path.node.declarations[0]
 			if(id?.name != callingFunc) return;
@@ -211,7 +215,6 @@ traverse(_testCode, {
 			if(typeof global[arg.name] != "number") continue;
 			Object.assign(arg, t.NumericLiteral(global[arg.name]))
 		}
-		// console.log(path.node.callee.name)
 	},
 	"ArrayExpression": function(path){
 		for(let elem of path.node.elements){
@@ -219,11 +222,15 @@ traverse(_testCode, {
 			if(typeof global[elem.name] != "number") continue;
 			Object.assign(elem, t.NumericLiteral(global[elem.name]))
 		}
+	},
+	// arr[xxx] => arr[value]
+	"MemberExpression": function(path){
+		if(typeof global[path.node.property.name] == "number") path.node.property = (t.NumericLiteral(global[path.node.property.name]))
 	}
 })
 
-// console.log(global.RB(279, 913))
-// console.log(global.RB(84, 309))
+// console.log(RB(275, 478))
+console.log(global.RB.toString())
   
 // console.log(global)
 original = generator(_testCode, {
